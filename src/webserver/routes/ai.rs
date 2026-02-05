@@ -22,11 +22,22 @@ use crate::ai::{
     get_chat_engine, try_get_chat_engine, ChatContext, ChatRequest as ChatEngineRequest,
     ChatResponse as ChatEngineResponse, ChatSession,
 };
+use crate::apis::llm::copilot;
 use crate::apis::llm::{try_get_llm_manager, ChatMessage, ChatRequest, Provider};
 use crate::config::{update_config_section, with_config};
 use crate::logger::{self, LogTag};
 use crate::webserver::state::AppState;
 use crate::webserver::utils::{error_response, success_response};
+use std::sync::RwLock;
+
+// ============================================================================
+// DEVICE CODE STORAGE
+// ============================================================================
+
+/// In-memory storage for device code during OAuth flow
+/// This is stored globally so the poll endpoint can access the device_code
+static DEVICE_CODE_STORAGE: once_cell::sync::Lazy<RwLock<Option<String>>> =
+    once_cell::sync::Lazy::new(|| RwLock::new(None));
 
 // ============================================================================
 // ROUTES
@@ -79,6 +90,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/tools", get(list_tools))
         .route("/permissions", get(get_permissions))
         .route("/permissions", patch(update_permissions))
+        // Copilot Authentication
+        .route("/copilot/auth/status", get(copilot_auth_status))
+        .route("/copilot/auth/start", post(copilot_auth_start))
+        .route("/copilot/auth/poll", post(copilot_auth_poll))
+        .route("/copilot/auth/logout", post(copilot_auth_logout))
+        .route("/copilot/auth/test", post(copilot_auth_test))
 }
 
 // ============================================================================
@@ -395,6 +412,16 @@ async fn get_ai_status(State(state): State<Arc<AppState>>) -> Response {
         rate_limit_per_minute: config.providers.ollama.rate_limit_per_minute,
     });
 
+    // Add Copilot (OAuth-based, no API key)
+    providers.push(ProviderStatus {
+        id: "copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        enabled: config.providers.copilot.enabled,
+        has_api_key: crate::apis::llm::copilot::is_authenticated(),
+        model: config.providers.copilot.model.clone(),
+        rate_limit_per_minute: config.providers.copilot.rate_limit_per_minute,
+    });
+
     let response = AiStatusResponse {
         enabled: config.enabled,
         filtering_enabled: config.filtering_enabled,
@@ -463,6 +490,16 @@ async fn list_providers(State(_state): State<Arc<AppState>>) -> Response {
         rate_limit_per_minute: config.providers.ollama.rate_limit_per_minute,
     });
 
+    // Copilot - OAuth based (no API key)
+    providers.push(ProviderStatus {
+        id: "copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        enabled: config.providers.copilot.enabled,
+        has_api_key: crate::apis::llm::copilot::is_authenticated(),
+        model: config.providers.copilot.model.clone(),
+        rate_limit_per_minute: config.providers.copilot.rate_limit_per_minute,
+    });
+
     success_response(ProvidersListResponse {
         providers,
         default_provider: config.default_provider,
@@ -524,6 +561,7 @@ async fn test_provider(
             Provider::Together => &cfg.ai.providers.together,
             Provider::OpenRouter => &cfg.ai.providers.openrouter,
             Provider::Mistral => &cfg.ai.providers.mistral,
+            Provider::Copilot => &cfg.ai.providers.copilot,
             Provider::Ollama => {
                 return cfg.ai.providers.ollama.model.clone();
             }
@@ -542,6 +580,7 @@ async fn test_provider(
                 Provider::Together => "meta-llama/Llama-3-70b-chat-hf".to_string(),
                 Provider::OpenRouter => "openai/gpt-4".to_string(),
                 Provider::Mistral => "mistral-large-latest".to_string(),
+                Provider::Copilot => "gpt-4o".to_string(),
                 Provider::Ollama => "llama3.2".to_string(),
             }
         }
@@ -1854,6 +1893,283 @@ async fn update_permissions(
 }
 
 // ============================================================================
+// COPILOT AUTHENTICATION ROUTES
+// ============================================================================
+
+// Response Types
+
+#[derive(Debug, Serialize)]
+pub struct CopilotAuthStatusResponse {
+    pub authenticated: bool,
+    pub has_github_token: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CopilotAuthStartResponse {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub device_code: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CopilotAuthPollRequest {
+    pub device_code: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CopilotAuthPollResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CopilotAuthLogoutResponse {
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CopilotAuthTestResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// Route Handlers
+
+/// GET /api/ai/copilot/auth/status - Check authentication status
+async fn copilot_auth_status(State(_state): State<Arc<AppState>>) -> Response {
+    let has_github_token = copilot::load_github_token().is_some();
+    let has_valid_copilot_token = copilot::load_copilot_token().is_some();
+
+    // Authenticated if we have a valid Copilot token or a GitHub token that can be exchanged
+    let authenticated = has_valid_copilot_token || has_github_token;
+
+    logger::debug(
+        LogTag::Api,
+        &format!(
+            "[COPILOT] Auth status: authenticated={}, has_github_token={}, has_copilot_token={}",
+            authenticated, has_github_token, has_valid_copilot_token
+        ),
+    );
+
+    success_response(CopilotAuthStatusResponse {
+        authenticated,
+        has_github_token,
+    })
+}
+
+/// POST /api/ai/copilot/auth/start - Start OAuth device flow
+async fn copilot_auth_start(State(_state): State<Arc<AppState>>) -> Response {
+    logger::info(LogTag::Api, "[COPILOT] Starting OAuth device flow");
+
+    match copilot::request_device_code().await {
+        Ok(device_code_response) => {
+            // Store device code for polling
+            if let Ok(mut storage) = DEVICE_CODE_STORAGE.write() {
+                *storage = Some(device_code_response.device_code.clone());
+            }
+
+            logger::info(
+                LogTag::Api,
+                &format!(
+                    "[COPILOT] Device code obtained. User code: {}",
+                    device_code_response.user_code
+                ),
+            );
+
+            success_response(CopilotAuthStartResponse {
+                user_code: device_code_response.user_code,
+                verification_uri: device_code_response.verification_uri,
+                device_code: device_code_response.device_code,
+                expires_in: device_code_response.expires_in,
+                interval: device_code_response.interval,
+            })
+        }
+        Err(e) => {
+            logger::error(
+                LogTag::Api,
+                &format!("[COPILOT] Failed to start OAuth flow: {}", e),
+            );
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "OAUTH_START_FAILED",
+                &e,
+                None,
+            )
+        }
+    }
+}
+
+/// POST /api/ai/copilot/auth/poll - Poll for OAuth authorization
+async fn copilot_auth_poll(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<CopilotAuthPollRequest>,
+) -> Response {
+    logger::debug(LogTag::Api, "[COPILOT] Polling for OAuth authorization");
+
+    match copilot::poll_for_access_token(&req.device_code).await {
+        Ok(Some(access_token)) => {
+            logger::info(LogTag::Api, "[COPILOT] User authorized! Got access token");
+
+            // Save GitHub token
+            if let Err(e) = copilot::save_github_token(&access_token) {
+                logger::error(
+                    LogTag::Api,
+                    &format!("[COPILOT] Failed to save GitHub token: {}", e),
+                );
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "TOKEN_SAVE_FAILED",
+                    &e,
+                    None,
+                );
+            }
+
+            // Exchange for Copilot token
+            match copilot::exchange_for_copilot_token(&access_token).await {
+                Ok(copilot_token) => {
+                    // Save Copilot token
+                    if let Err(e) = copilot::save_copilot_token(&copilot_token) {
+                        logger::error(
+                            LogTag::Api,
+                            &format!("[COPILOT] Failed to save Copilot token: {}", e),
+                        );
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "TOKEN_SAVE_FAILED",
+                            &e,
+                            None,
+                        );
+                    }
+
+                    // Clear stored device code
+                    if let Ok(mut storage) = DEVICE_CODE_STORAGE.write() {
+                        *storage = None;
+                    }
+
+                    logger::info(
+                        LogTag::Api,
+                        "[COPILOT] OAuth flow complete! Copilot token saved",
+                    );
+
+                    success_response(CopilotAuthPollResponse {
+                        success: true,
+                        pending: None,
+                        error: None,
+                    })
+                }
+                Err(e) => {
+                    logger::error(
+                        LogTag::Api,
+                        &format!("[COPILOT] Failed to exchange for Copilot token: {}", e),
+                    );
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "TOKEN_EXCHANGE_FAILED",
+                        &e,
+                        None,
+                    )
+                }
+            }
+        }
+        Ok(None) => {
+            // Still pending
+            logger::debug(LogTag::Api, "[COPILOT] Authorization still pending");
+            success_response(CopilotAuthPollResponse {
+                success: false,
+                pending: Some(true),
+                error: None,
+            })
+        }
+        Err(e) => {
+            logger::error(LogTag::Api, &format!("[COPILOT] OAuth poll error: {}", e));
+            success_response(CopilotAuthPollResponse {
+                success: false,
+                pending: None,
+                error: Some(e),
+            })
+        }
+    }
+}
+
+/// POST /api/ai/copilot/auth/logout - Remove saved tokens
+async fn copilot_auth_logout(State(_state): State<Arc<AppState>>) -> Response {
+    logger::info(LogTag::Api, "[COPILOT] Logging out - removing tokens");
+
+    let github_path = copilot::get_github_token_path();
+    let copilot_path = copilot::get_copilot_token_path();
+
+    // Remove GitHub token file
+    if github_path.exists() {
+        if let Err(e) = std::fs::remove_file(&github_path) {
+            logger::error(
+                LogTag::Api,
+                &format!("[COPILOT] Failed to remove GitHub token file: {}", e),
+            );
+        } else {
+            logger::info(LogTag::Api, "[COPILOT] Removed GitHub token file");
+        }
+    }
+
+    // Remove Copilot token file
+    if copilot_path.exists() {
+        if let Err(e) = std::fs::remove_file(&copilot_path) {
+            logger::error(
+                LogTag::Api,
+                &format!("[COPILOT] Failed to remove Copilot token file: {}", e),
+            );
+        } else {
+            logger::info(LogTag::Api, "[COPILOT] Removed Copilot token file");
+        }
+    }
+
+    // Clear stored device code
+    if let Ok(mut storage) = DEVICE_CODE_STORAGE.write() {
+        *storage = None;
+    }
+
+    logger::info(LogTag::Api, "[COPILOT] Logout complete");
+
+    success_response(CopilotAuthLogoutResponse { success: true })
+}
+
+/// POST /api/ai/copilot/auth/test - Test if authentication works
+async fn copilot_auth_test(State(_state): State<Arc<AppState>>) -> Response {
+    logger::info(LogTag::Api, "[COPILOT] Testing authentication");
+
+    match copilot::get_valid_copilot_token().await {
+        Ok(token) => {
+            logger::info(
+                LogTag::Api,
+                &format!(
+                    "[COPILOT] Authentication test successful. API base: {}",
+                    token.api_base
+                ),
+            );
+            success_response(CopilotAuthTestResponse {
+                success: true,
+                error: None,
+            })
+        }
+        Err(e) => {
+            logger::error(
+                LogTag::Api,
+                &format!("[COPILOT] Authentication test failed: {}", e),
+            );
+            success_response(CopilotAuthTestResponse {
+                success: false,
+                error: Some(e),
+            })
+        }
+    }
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
@@ -1869,6 +2185,7 @@ fn get_model_for_provider(provider: Provider) -> String {
             Provider::Together => &cfg.ai.providers.together,
             Provider::OpenRouter => &cfg.ai.providers.openrouter,
             Provider::Mistral => &cfg.ai.providers.mistral,
+            Provider::Copilot => &cfg.ai.providers.copilot,
             Provider::Ollama => {
                 return cfg.ai.providers.ollama.model.clone();
             }
@@ -1888,6 +2205,7 @@ fn get_model_for_provider(provider: Provider) -> String {
                 Provider::Together => "meta-llama/Llama-3-70b-chat-hf".to_string(),
                 Provider::OpenRouter => "openai/gpt-4".to_string(),
                 Provider::Mistral => "mistral-large-latest".to_string(),
+                Provider::Copilot => "gpt-4o".to_string(),
             }
         }
     })

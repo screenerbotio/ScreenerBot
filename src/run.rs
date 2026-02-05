@@ -745,6 +745,19 @@ async fn initialize_llm_providers() -> Result<(), String> {
                 }
             }
         }
+
+        // Copilot (no API key needed, uses OAuth tokens)
+        if cfg.ai.providers.copilot.enabled {
+            use crate::apis::llm::copilot::CopilotClient;
+            let model = get_model(&cfg.ai.providers.copilot.model);
+            let client = CopilotClient::new(model, cfg.ai.providers.copilot.enabled);
+            llm_manager.set_copilot(std::sync::Arc::new(client));
+            if CopilotClient::is_authenticated() {
+                enabled_providers.push("Copilot (authenticated)");
+            } else {
+                enabled_providers.push("Copilot (not authenticated)");
+            }
+        }
     });
 
     init_llm_manager(llm_manager)

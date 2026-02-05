@@ -23,7 +23,7 @@ config_struct! {
         /// Default AI provider to use
         #[metadata(field_metadata! {
             label: "Default Provider",
-            hint: "Primary AI provider to use (openai, anthropic, groq, deepseek, gemini, ollama, together, openrouter, mistral)",
+            hint: "Primary AI provider to use (openai, anthropic, groq, deepseek, gemini, ollama, together, openrouter, mistral, copilot)",
             placeholder: "openai",
             category: "Master Control",
         })]
@@ -347,6 +347,14 @@ config_struct! {
             category: "Providers",
         })]
         mistral: AiProviderConfig = AiProviderConfig::default(),
+
+        /// GitHub Copilot configuration (OAuth-based, no API key needed)
+        #[metadata(field_metadata! {
+            label: "Copilot",
+            hint: "GitHub Copilot API configuration (requires GitHub authentication, no API key needed)",
+            category: "Providers",
+        })]
+        copilot: AiProviderConfig = AiProviderConfig::default(),
     }
 }
 

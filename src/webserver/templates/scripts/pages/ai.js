@@ -19,6 +19,7 @@ const PROVIDER_NAMES = {
   together: "Together AI",
   openrouter: "OpenRouter",
   mistral: "Mistral AI",
+  copilot: "GitHub Copilot",
 };
 
 function createLifecycle() {
@@ -43,6 +44,10 @@ function createLifecycle() {
     historyTotal: 0,
     instructions: [], // Store instructions for drag-drop
     draggedItem: null, // Track dragged instruction
+    copilotAuth: {
+      authenticated: false,
+      hasGithubToken: false,
+    },
     chat: {
       sessions: [],
       currentSession: null,
@@ -413,38 +418,76 @@ function createLifecycle() {
         };
 
         const isDefault = providerId === defaultProvider;
-        const isConfigured = provider.enabled && provider.api_key && provider.model;
         const name = PROVIDER_NAMES[providerId];
 
+        // Handle Copilot specially (OAuth-based)
+        if (providerId === "copilot") {
+          const isAuthenticated = state.copilotAuth.authenticated;
+          const isConfigured = isAuthenticated && provider.enabled && provider.model;
+
+          return `
+          <div class="provider-item ${isDefault ? "is-default" : ""} ${isConfigured ? "is-configured" : ""}" data-provider="${providerId}">
+            <div class="provider-select" onclick="window.aiPage.setDefaultProvider('${providerId}')" title="Set as default">
+              <div class="provider-radio"></div>
+            </div>
+            
+            <div class="provider-logo">
+              <img src="/assets/providers/${providerId}.png" alt="${name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+              <div class="provider-logo-fallback" style="display: none;">${name.charAt(0)}</div>
+            </div>
+            
+            <div class="provider-info">
+              <div class="provider-name">${name}</div>
+              <div class="provider-model">${provider.model || "Not configured"}</div>
+            </div>
+            
+            <div class="provider-status">
+              ${isConfigured ? '<span class="status-badge configured"><i class="icon-check"></i> Ready</span>' : isAuthenticated ? '<span class="status-badge not-configured">Not Set Up</span>' : '<span class="status-badge not-configured">Not Connected</span>'}
+              ${isDefault ? '<span class="status-badge default">Default</span>' : ""}
+            </div>
+            
+            <div class="provider-actions">
+              ${isConfigured ? `<button class="provider-btn test-btn" onclick="window.aiPage.testProviderFromList('${providerId}')"><i class="icon-zap"></i> Test</button>` : ""}
+              <button class="provider-btn ${isAuthenticated ? "" : "primary"}" onclick="window.aiPage.configureProvider('${providerId}')">
+                <i class="icon-${isAuthenticated ? "settings" : "github"}"></i> ${isAuthenticated ? "Configure" : "Login with GitHub"}
+              </button>
+            </div>
+          </div>
+        `;
+        }
+
+        // Regular providers (API key-based)
+        const isConfigured = provider.enabled && provider.api_key && provider.model;
+
         return `
-        <div class="provider-item ${isDefault ? "is-default" : ""} ${isConfigured ? "is-configured" : ""}" data-provider="${providerId}">
-          <div class="provider-select" onclick="window.aiPage.setDefaultProvider('${providerId}')" title="Set as default">
-            <div class="provider-radio"></div>
+          <div class="provider-item ${isDefault ? "is-default" : ""} ${isConfigured ? "is-configured" : ""}" data-provider="${providerId}">
+            <div class="provider-select" onclick="window.aiPage.setDefaultProvider('${providerId}')" title="Set as default">
+              <div class="provider-radio"></div>
+            </div>
+            
+            <div class="provider-logo">
+              <img src="/assets/providers/${providerId}.png" alt="${name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+              <div class="provider-logo-fallback" style="display: none;">${name.charAt(0)}</div>
+            </div>
+            
+            <div class="provider-info">
+              <div class="provider-name">${name}</div>
+              <div class="provider-model">${provider.model || "Not configured"}</div>
+            </div>
+            
+            <div class="provider-status">
+              ${isConfigured ? '<span class="status-badge configured"><i class="icon-check"></i> Ready</span>' : '<span class="status-badge not-configured">Not Set Up</span>'}
+              ${isDefault ? '<span class="status-badge default">Default</span>' : ""}
+            </div>
+            
+            <div class="provider-actions">
+              ${isConfigured ? `<button class="provider-btn test-btn" onclick="window.aiPage.testProviderFromList('${providerId}')"><i class="icon-zap"></i> Test</button>` : ""}
+              <button class="provider-btn ${isConfigured ? "" : "primary"}" onclick="window.aiPage.configureProvider('${providerId}')">
+                <i class="icon-${isConfigured ? "settings" : "plus"}"></i> ${isConfigured ? "Edit" : "Configure"}
+              </button>
+            </div>
           </div>
-          
-          <div class="provider-logo">
-            <img src="/assets/providers/${providerId}.png" alt="${name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-            <div class="provider-logo-fallback" style="display: none;">${name.charAt(0)}</div>
-          </div>
-          
-          <div class="provider-info">
-            <div class="provider-name">${name}</div>
-            <div class="provider-model">${provider.model || "Not configured"}</div>
-          </div>
-          
-          <div class="provider-status">
-            ${isConfigured ? '<span class="status-badge configured"><i class="icon-check"></i> Ready</span>' : '<span class="status-badge not-configured">Not Set Up</span>'}
-            ${isDefault ? '<span class="status-badge default">Default</span>' : ""}
-          </div>
-          
-          <div class="provider-actions">
-            ${isConfigured ? `<button class="provider-btn test-btn" onclick="window.aiPage.testProviderFromList('${providerId}')"><i class="icon-zap"></i> Test</button>` : ""}
-            <button class="provider-btn ${isConfigured ? "" : "primary"}" onclick="window.aiPage.configureProvider('${providerId}')">
-              <i class="icon-${isConfigured ? "settings" : "plus"}"></i> ${isConfigured ? "Edit" : "Configure"}
-            </button>
-          </div>
-        </div>
-      `;
+        `;
       })
       .join("");
   }
@@ -526,6 +569,12 @@ function createLifecycle() {
    * Open provider configuration modal
    */
   function configureProvider(providerId) {
+    // Handle Copilot OAuth separately
+    if (providerId === "copilot") {
+      configureCopilot();
+      return;
+    }
+
     const provider = state.providers.find((p) => p.id === providerId) || {
       id: providerId,
       enabled: false,
@@ -780,8 +829,470 @@ function createLifecycle() {
       together: "meta-llama/Llama-3-70b-chat-hf",
       openrouter: "openai/gpt-4",
       mistral: "mistral-large-latest",
+      copilot: "gpt-4o",
     };
     return defaults[providerId] || "gpt-4";
+  }
+
+  // ============================================================================
+  // Copilot OAuth Functions
+  // ============================================================================
+
+  /**
+   * Check GitHub Copilot authentication status
+   */
+  async function checkCopilotAuthStatus() {
+    try {
+      const response = await fetch("/api/ai/copilot/auth/status");
+      const data = await response.json();
+      state.copilotAuth = {
+        authenticated: data.authenticated || false,
+        hasGithubToken: data.has_github_token || false,
+      };
+      return data.authenticated;
+    } catch (error) {
+      console.error("[AI] Failed to check Copilot auth:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Start GitHub Copilot device code flow
+   */
+  async function startCopilotAuth(modal) {
+    try {
+      const statusDiv = modal.querySelector(".copilot-auth-status");
+      statusDiv.innerHTML = '<div class="loading-spinner"><i class="icon-loader spin"></i> Starting authentication...</div>';
+
+      const response = await fetch("/api/ai/copilot/auth/start", {
+        method: "POST",
+      });
+
+      if (!response.ok) throw new Error("Failed to start authentication");
+
+      const data = await response.json();
+
+      // Show user code and verification URL
+      statusDiv.innerHTML = `
+        <div class="copilot-device-flow">
+          <div class="device-flow-header">
+            <i class="icon-info"></i>
+            <span>Authentication Required</span>
+          </div>
+          <div class="device-flow-body">
+            <p>Enter this code on GitHub:</p>
+            <div class="user-code">${data.user_code}</div>
+            <a href="${data.verification_uri}" target="_blank" class="btn btn-primary">
+              <i class="icon-external-link"></i>
+              Open GitHub
+            </a>
+            <p class="help-text">Waiting for authorization...</p>
+          </div>
+        </div>
+      `;
+
+      // Auto-open verification URL
+      window.open(data.verification_uri, "_blank");
+
+      // Start polling
+      pollCopilotAuth(data.device_code, data.interval, modal);
+    } catch (error) {
+      console.error("[AI] Failed to start Copilot auth:", error);
+      Utils.showToast({
+        type: "error",
+        title: "Error",
+        message: error.message || "Failed to start authentication",
+      });
+    }
+  }
+
+  /**
+   * Poll for GitHub Copilot authentication completion
+   */
+  async function pollCopilotAuth(deviceCode, interval, modal) {
+    const maxAttempts = 60; // 5 minutes max
+    let attempts = 0;
+
+    const poll = async () => {
+      if (attempts >= maxAttempts) {
+        const statusDiv = modal.querySelector(".copilot-auth-status");
+        statusDiv.innerHTML = `
+          <div class="auth-error">
+            <i class="icon-x-circle"></i>
+            Authentication timed out. Please try again.
+          </div>
+        `;
+        Utils.showToast({
+          type: "error",
+          title: "Timeout",
+          message: "Authentication timed out",
+        });
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/ai/copilot/auth/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_code: deviceCode }),
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          state.copilotAuth = {
+            authenticated: true,
+            hasGithubToken: true,
+          };
+
+          const statusDiv = modal.querySelector(".copilot-auth-status");
+          statusDiv.innerHTML = `
+            <div class="auth-success">
+              <i class="icon-check-circle"></i>
+              Successfully connected to GitHub Copilot!
+            </div>
+          `;
+
+          playToggleOn();
+          Utils.showToast({
+            type: "success",
+            title: "Success",
+            message: "GitHub Copilot connected!",
+          });
+
+          // Refresh providers list
+          await loadProviders();
+
+          // Close modal after 1.5 seconds
+          setTimeout(() => {
+            modal.remove();
+          }, 1500);
+
+          return;
+        }
+
+        if (data.pending) {
+          attempts++;
+          setTimeout(poll, interval * 1000);
+        } else {
+          const errorMsg = typeof data.error === 'string' ? data.error : 
+            (data.error?.message || JSON.stringify(data.error) || "Authentication failed");
+          throw new Error(errorMsg);
+        }
+      } catch (error) {
+        console.error("[AI] Poll error:", error);
+        const errorMessage = error.message || String(error) || "Authentication failed";
+        const statusDiv = modal.querySelector(".copilot-auth-status");
+        statusDiv.innerHTML = `
+          <div class="auth-error">
+            <i class="icon-x-circle"></i>
+            ${errorMessage}
+          </div>
+        `;
+        playError();
+        Utils.showToast({
+          type: "error",
+          title: "Error",
+          message: errorMessage,
+        });
+      }
+    };
+
+    poll();
+  }
+
+  /**
+   * Disconnect GitHub Copilot
+   */
+  async function disconnectCopilot() {
+    try {
+      const response = await fetch("/api/ai/copilot/auth/logout", {
+        method: "POST",
+      });
+
+      if (!response.ok) throw new Error("Failed to disconnect");
+
+      state.copilotAuth = {
+        authenticated: false,
+        hasGithubToken: false,
+      };
+
+      playToggleOn();
+      Utils.showToast({
+        type: "success",
+        title: "Disconnected",
+        message: "GitHub Copilot disconnected",
+      });
+
+      // Refresh providers list
+      await loadProviders();
+
+      // Close modal if open
+      document.querySelector(".modal-overlay")?.remove();
+    } catch (error) {
+      console.error("[AI] Failed to disconnect Copilot:", error);
+      playError();
+      Utils.showToast({
+        type: "error",
+        title: "Error",
+        message: error.message || "Failed to disconnect",
+      });
+    }
+  }
+
+  /**
+   * Test GitHub Copilot connection
+   */
+  async function testCopilotConnection(modal) {
+    try {
+      const testBtn = modal.querySelector("#copilot-test-btn");
+      const testResult = modal.querySelector("#copilot-test-result");
+
+      testBtn.disabled = true;
+      testBtn.innerHTML = '<i class="icon-loader spin"></i> Testing...';
+      testResult.className = "test-connection-result";
+
+      const response = await fetch("/api/ai/providers/copilot/test", {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.data?.success) {
+        testResult.className = "test-connection-result visible success";
+        testResult.innerHTML = `
+          <span class="test-result-message">
+            <i class="icon-check-circle"></i> Connection successful!
+          </span>
+          <dl class="test-result-details">
+            <dt>Model:</dt><dd>${data.data.model || "N/A"}</dd>
+            <dt>Latency:</dt><dd>${Math.round(data.data.latency_ms || 0)}ms</dd>
+            <dt>Tokens:</dt><dd>${data.data.tokens_used || 0}</dd>
+          </dl>
+        `;
+        playToggleOn();
+      } else {
+        throw new Error(data.error?.message || "Test failed");
+      }
+    } catch (error) {
+      const testResult = modal.querySelector("#copilot-test-result");
+      testResult.className = "test-connection-result visible error";
+      testResult.innerHTML = `
+        <span class="test-result-message">
+          <i class="icon-x-circle"></i> ${error.message}
+        </span>
+      `;
+      playError();
+    } finally {
+      const testBtn = modal.querySelector("#copilot-test-btn");
+      testBtn.disabled = false;
+      testBtn.innerHTML = '<i class="icon-zap"></i> Test Connection';
+    }
+  }
+
+  /**
+   * Open GitHub Copilot configuration modal
+   */
+  function configureCopilot() {
+    const isAuthenticated = state.copilotAuth.authenticated;
+    const provider = state.providers.find((p) => p.id === "copilot") || {
+      id: "copilot",
+      enabled: false,
+      model: "",
+    };
+
+    const modal = document.createElement("div");
+    modal.className = "modal-overlay";
+    modal.innerHTML = `
+      <div class="modal-dialog provider-config-modal copilot-modal">
+        <div class="modal-header">
+          <h3>
+            <span class="provider-icon"><i class="icon-github"></i></span>
+            GitHub Copilot Configuration
+          </h3>
+          <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">
+            <i class="icon-x"></i>
+          </button>
+        </div>
+        <div class="modal-body">
+          <!-- Authentication Status -->
+          <div class="copilot-auth-status">
+            ${
+              isAuthenticated
+                ? `
+              <div class="auth-success">
+                <i class="icon-check-circle"></i>
+                Connected to GitHub Copilot
+              </div>
+            `
+                : `
+              <div class="auth-info">
+                <i class="icon-info"></i>
+                Not connected to GitHub
+              </div>
+            `
+            }
+          </div>
+          
+          ${
+            !isAuthenticated
+              ? `
+            <!-- Login Section -->
+            <div class="form-group">
+              <label>Authentication</label>
+              <button type="button" class="btn btn-primary" id="copilot-login-btn" style="width: 100%;">
+                <i class="icon-github"></i>
+                Login with GitHub
+              </button>
+              <small class="form-help">Sign in with your GitHub account to use Copilot</small>
+            </div>
+          `
+              : `
+            <!-- Model Section -->
+            <div class="form-group model-section">
+              <label for="copilot-modal-model">Model</label>
+              <div class="model-input-wrapper">
+                <input type="text" id="copilot-modal-model" class="form-control" 
+                       placeholder="e.g., gpt-4o, gpt-4..." value="${provider.model || "gpt-4o"}">
+              </div>
+              <small class="form-help">The model to use for Copilot requests</small>
+            </div>
+            
+            <!-- Enable Checkbox -->
+            <div class="form-group checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="copilot-modal-enabled" ${provider.enabled ? "checked" : ""}>
+                <span>Enable GitHub Copilot</span>
+              </label>
+              <small class="form-help">When enabled, Copilot will be available for Assistant analysis</small>
+            </div>
+            
+            <!-- Test Connection Section -->
+            <div class="test-connection-section">
+              <div class="test-connection-header">
+                <span class="test-connection-title">Connection Test</span>
+                <button type="button" class="btn btn-sm btn-secondary" id="copilot-test-btn">
+                  <i class="icon-zap"></i>
+                  Test Connection
+                </button>
+              </div>
+              <div class="test-connection-result" id="copilot-test-result">
+                <span class="test-result-message"></span>
+                <dl class="test-result-details"></dl>
+              </div>
+            </div>
+          `
+          }
+        </div>
+        <div class="modal-footer modal-footer-split">
+          <div class="footer-left">
+            ${isAuthenticated ? '<button class="btn btn-danger" id="copilot-disconnect-btn"><i class="icon-log-out"></i> Disconnect</button>' : ""}
+          </div>
+          <div class="footer-right">
+            ${
+              isAuthenticated
+                ? `
+              <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+              <button class="btn btn-primary" id="copilot-save-btn">
+                <i class="icon-save"></i>
+                Save Configuration
+              </button>
+            `
+                : '<button class="btn btn-secondary" onclick="this.closest(\'.modal-overlay\').remove()">Close</button>'
+            }
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Login handler
+    const loginBtn = modal.querySelector("#copilot-login-btn");
+    if (loginBtn) {
+      loginBtn.addEventListener("click", () => {
+        startCopilotAuth(modal);
+      });
+    }
+
+    // Test connection handler
+    const testBtn = modal.querySelector("#copilot-test-btn");
+    if (testBtn) {
+      testBtn.addEventListener("click", () => {
+        testCopilotConnection(modal);
+      });
+    }
+
+    // Disconnect handler
+    const disconnectBtn = modal.querySelector("#copilot-disconnect-btn");
+    if (disconnectBtn) {
+      disconnectBtn.addEventListener("click", async () => {
+        const confirmed = await ConfirmationDialog.show({
+          title: "Disconnect GitHub Copilot",
+          message: "Are you sure you want to disconnect GitHub Copilot?",
+          confirmText: "Disconnect",
+          confirmClass: "danger",
+        });
+
+        if (confirmed) {
+          await disconnectCopilot();
+        }
+      });
+    }
+
+    // Save handler
+    const saveBtn = modal.querySelector("#copilot-save-btn");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", async () => {
+        const model = modal.querySelector("#copilot-modal-model").value.trim();
+        const enabled = modal.querySelector("#copilot-modal-enabled").checked;
+
+        if (!model) {
+          Utils.showToast({
+            type: "warning",
+            title: "Missing Model",
+            message: "Please enter a model name",
+          });
+          return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="icon-loader spin"></i> Saving...';
+
+        try {
+          const response = await fetch("/api/ai/providers/copilot", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              enabled,
+              model,
+            }),
+          });
+
+          if (!response.ok) throw new Error("Failed to save configuration");
+
+          playToggleOn();
+          Utils.showToast({
+            type: "success",
+            title: "Saved",
+            message: "GitHub Copilot configuration saved",
+          });
+
+          modal.remove();
+          await loadProviders();
+        } catch (error) {
+          console.error("[AI] Failed to save Copilot config:", error);
+          playError();
+          Utils.showToast({
+            type: "error",
+            title: "Error",
+            message: "Failed to save configuration",
+          });
+          saveBtn.disabled = false;
+          saveBtn.innerHTML = '<i class="icon-save"></i> Save Configuration';
+        }
+      });
+    }
   }
 
   // ============================================================================
@@ -3224,7 +3735,7 @@ function createLifecycle() {
     for (const [groupName, groupSessions] of Object.entries(groups)) {
       if (groupSessions.length === 0) continue;
 
-      html += `<div class="sessions-group">`;
+      html += "<div class=\"sessions-group\">";
       html += `<div class="sessions-group-header">${groupName}</div>`;
 
       for (const session of groupSessions) {
@@ -3253,7 +3764,7 @@ function createLifecycle() {
           </div>
         `;
       }
-      html += `</div>`;
+      html += "</div>";
     }
 
     container.innerHTML = html;
@@ -3363,7 +3874,8 @@ function createLifecycle() {
     if (typeof parsedToolCalls === "string") {
       try {
         parsedToolCalls = JSON.parse(parsedToolCalls);
-      } catch (e) {
+        // eslint-disable-next-line no-unused-vars
+      } catch (_e) {
         parsedToolCalls = null;
       }
     }
@@ -3670,6 +4182,8 @@ function createLifecycle() {
   api.setDefaultProvider = setDefaultProvider;
   api.testProviderFromList = testProviderFromList;
   api.configureProvider = configureProvider;
+  api.checkCopilotAuthStatus = checkCopilotAuthStatus;
+  api.disconnectCopilot = disconnectCopilot;
   api.createInstruction = createInstruction;
   api.saveNewInstruction = saveNewInstruction;
   api.toggleInstruction = toggleInstruction;
@@ -3700,6 +4214,9 @@ function createLifecycle() {
      */
     async init(_ctx) {
       console.log("[AI] Initializing");
+
+      // Check Copilot auth status
+      await checkCopilotAuthStatus();
 
       // Initialize sidebar navigation
       initSubTabs();
