@@ -447,7 +447,6 @@ function createLifecycle() {
             </div>
             
             <div class="provider-actions">
-              ${isConfigured ? `<button class="provider-btn test-btn" onclick="window.aiPage.testProviderFromList('${providerId}')"><i class="icon-zap"></i> Test</button>` : ""}
               <button class="provider-btn ${isAuthenticated ? "" : "primary"}" onclick="window.aiPage.configureProvider('${providerId}')">
                 <i class="icon-${isAuthenticated ? "settings" : "github"}"></i> ${isAuthenticated ? "Configure" : "Login with GitHub"}
               </button>
@@ -726,13 +725,13 @@ function createLifecycle() {
 
         const data = await response.json();
 
-        if (response.ok && data.data?.success) {
+        if (response.ok && data.success) {
           testResult.className = "test-connection-result visible success";
           testMessage.innerHTML = '<i class="icon-check-circle"></i> Connection successful!';
           testDetails.innerHTML = `
-            <dt>Model:</dt><dd>${data.data.model || "N/A"}</dd>
-            <dt>Latency:</dt><dd>${Math.round(data.data.latency_ms || 0)}ms</dd>
-            <dt>Tokens:</dt><dd>${data.data.tokens_used || 0}</dd>
+            <dt>Model:</dt><dd>${data.model || "N/A"}</dd>
+            <dt>Latency:</dt><dd>${Math.round(data.latency_ms || 0)}ms</dd>
+            <dt>Tokens:</dt><dd>${data.tokens_used || 0}</dd>
           `;
           playToggleOn();
         } else {
@@ -1044,38 +1043,46 @@ function createLifecycle() {
    * Test GitHub Copilot connection
    */
   async function testCopilotConnection(modal) {
-    try {
-      const testBtn = modal.querySelector("#copilot-test-btn");
-      const testResult = modal.querySelector("#copilot-test-result");
+    const testBtn = modal.querySelector("#copilot-test-btn");
+    const testResult = modal.querySelector("#copilot-test-result");
 
+    if (!testBtn || !testResult) {
+      console.error("[AI] Copilot test elements not found in modal");
+      return;
+    }
+
+    try {
       testBtn.disabled = true;
       testBtn.innerHTML = '<i class="icon-loader spin"></i> Testing...';
       testResult.className = "test-connection-result";
+
+      console.log("[AI] Testing Copilot connection...");
 
       const response = await fetch("/api/ai/providers/copilot/test", {
         method: "POST",
       });
 
       const data = await response.json();
+      console.log("[AI] Copilot test response:", data);
 
-      if (response.ok && data.data?.success) {
+      if (response.ok && data.success) {
         testResult.className = "test-connection-result visible success";
         testResult.innerHTML = `
           <span class="test-result-message">
             <i class="icon-check-circle"></i> Connection successful!
           </span>
           <dl class="test-result-details">
-            <dt>Model:</dt><dd>${data.data.model || "N/A"}</dd>
-            <dt>Latency:</dt><dd>${Math.round(data.data.latency_ms || 0)}ms</dd>
-            <dt>Tokens:</dt><dd>${data.data.tokens_used || 0}</dd>
+            <dt>Model:</dt><dd>${data.model || "N/A"}</dd>
+            <dt>Latency:</dt><dd>${Math.round(data.latency_ms || 0)}ms</dd>
+            <dt>Tokens:</dt><dd>${data.tokens_used || 0}</dd>
           </dl>
         `;
         playToggleOn();
       } else {
-        throw new Error(data.error?.message || "Test failed");
+        throw new Error(data.error?.message || data.error || "Test failed");
       }
     } catch (error) {
-      const testResult = modal.querySelector("#copilot-test-result");
+      console.error("[AI] Copilot test failed:", error);
       testResult.className = "test-connection-result visible error";
       testResult.innerHTML = `
         <span class="test-result-message">
@@ -1084,7 +1091,6 @@ function createLifecycle() {
       `;
       playError();
     } finally {
-      const testBtn = modal.querySelector("#copilot-test-btn");
       testBtn.disabled = false;
       testBtn.innerHTML = '<i class="icon-zap"></i> Test Connection';
     }
