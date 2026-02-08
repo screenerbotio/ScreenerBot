@@ -84,3 +84,4 @@ copilot-session-*.md
 .prettierrc.json
 .stylelintrc.json
 BUILD.md
+eslint.config.js
