@@ -522,13 +522,9 @@ mod tests {
 
     #[test]
     fn test_parse_api_base_from_token() {
-        let token =
-            "some_token_value;proxy-ep=proxy.individual.githubcopilot.com;other=data";
+        let token = "some_token_value;proxy-ep=proxy.individual.githubcopilot.com;other=data";
         let api_base = parse_api_base_from_token(token);
-        assert_eq!(
-            api_base,
-            Some("https://api.githubcopilot.com".to_string())
-        );
+        assert_eq!(api_base, Some("https://api.githubcopilot.com".to_string()));
     }
 
     #[test]
